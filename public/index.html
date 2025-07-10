@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Tunnelmole Service Dashboard</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            padding: 30px;
+        }
+        h1 {
+            color: #333;
+            margin-bottom: 30px;
+            text-align: center;
+        }
+        .status {
+            padding: 10px 20px;
+            border-radius: 4px;
+            margin-bottom: 20px;
+            text-align: center;
+        }
+        .status.online {
+            background-color: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+        .status.offline {
+            background-color: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+        .connections-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(350px, 1fr));
+            gap: 20px;
+            margin-top: 20px;
+        }
+        .connection-card {
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            padding: 20px;
+            background: #f8f9fa;
+        }
+        .connection-card h3 {
+            margin-top: 0;
+            color: #007bff;
+            word-break: break-all;
+        }
+        .connection-info {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+            margin-top: 15px;
+        }
+        .info-item {
+            background: white;
+            padding: 10px;
+            border-radius: 4px;
+            border: 1px solid #e9ecef;
+        }
+        .info-label {
+            font-weight: bold;
+            color: #666;
+            font-size: 0.9em;
+        }
+        .info-value {
+            font-family: monospace;
+            color: #333;
+            word-break: break-all;
+        }
+        .no-connections {
+            text-align: center;
+            color: #666;
+            font-style: italic;
+            padding: 40px;
+        }
+        .refresh-btn {
+            background: #007bff;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 16px;
+            margin-bottom: 20px;
+        }
+        .refresh-btn:hover {
+            background: #0056b3;
+        }
+        .last-updated {
+            text-align: center;
+            color: #666;
+            font-size: 0.9em;
+            margin-top: 20px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Tunnelmole Service Dashboard</h1>
+        
+        <div id="status" class="status offline">
+            Service Status: Checking...
+        </div>
+
+        <button class="refresh-btn" onclick="fetchConnections()">
+            Refresh Connections
+        </button>
+
+        <div id="connections-container">
+            <div class="no-connections">Loading connections...</div>
+        </div>
+
+        <div id="last-updated" class="last-updated"></div>
+    </div>
+
+    <script>
+        let password = '';
+        
+        async function fetchConnections() {
+            try {
+                if (!password) {
+                    password = prompt('Enter monitoring password:');
+                    if (!password) return;
+                }
+
+                const response = await fetch(`/tunnelmole-connections?password=${encodeURIComponent(password)}`);
+                
+                if (response.status === 401) {
+                    password = '';
+                    alert('Invalid password. Please try again.');
+                    return;
+                }
+
+                const connections = await response.json();
+                displayConnections(connections);
+                updateStatus('online');
+                updateLastUpdated();
+            } catch (error) {
+                console.error('Error fetching connections:', error);
+                updateStatus('offline');
+                document.getElementById('connections-container').innerHTML = 
+                    '<div class="no-connections">Error loading connections. Check if the service is running.</div>';
+            }
+        }
+
+        function displayConnections(connections) {
+            const container = document.getElementById('connections-container');
+            
+            if (connections.length === 0) {
+                container.innerHTML = '<div class="no-connections">No active connections</div>';
+                return;
+            }
+
+            const connectionsHtml = connections.map(conn => `
+                <div class="connection-card">
+                    <h3>${conn.hostname}</h3>
+                    <div class="connection-info">
+                        <div class="info-item">
+                            <div class="info-label">Client ID</div>
+                            <div class="info-value">${conn.clientId}</div>
+                        </div>
+                        <div class="info-item">
+                            <div class="info-label">IP Address</div>
+                            <div class="info-value">${conn.ipAddress}</div>
+                        </div>
+                        <div class="info-item">
+                            <div class="info-label">HTTP URL</div>
+                            <div class="info-value">
+                                <a href="http://${conn.hostname}" target="_blank">
+                                    http://${conn.hostname}
+                                </a>
+                            </div>
+                        </div>
+                        <div class="info-item">
+                            <div class="info-label">HTTPS URL</div>
+                            <div class="info-value">
+                                <a href="https://${conn.hostname}" target="_blank">
+                                    https://${conn.hostname}
+                                </a>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            `).join('');
+
+            container.innerHTML = `<div class="connections-grid">${connectionsHtml}</div>`;
+        }
+
+        function updateStatus(status) {
+            const statusElement = document.getElementById('status');
+            statusElement.className = `status ${status}`;
+            statusElement.textContent = `Service Status: ${status === 'online' ? 'Online' : 'Offline'}`;
+        }
+
+        function updateLastUpdated() {
+            const lastUpdatedElement = document.getElementById('last-updated');
+            lastUpdatedElement.textContent = `Last updated: ${new Date().toLocaleString()}`;
+        }
+
+        // Auto-refresh every 30 seconds
+        setInterval(fetchConnections, 30000);
+        
+        // Initial load
+        fetchConnections();
+    </script>
+</body>
+</html>

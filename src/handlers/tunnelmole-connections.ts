@@ -11,6 +11,7 @@ const tunnelmoleConnections = async function(req : Request, res : Response) {
     if (password !== topSecretPassword) {
         res.status(401);
         res.send("Unauthorized. Your attempt has been logged");
+        return;
     }
 
     const proxy = Proxy.getInstance();

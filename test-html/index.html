@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Test Server</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 40px; }
+        h1 { color: #333; }
+        .status { background: #e7f3ff; padding: 20px; border-radius: 5px; }
+    </style>
+</head>
+<body>
+    <h1>Test Server Running</h1>
+    <div class="status">
+        <p>✅ This is a test server running on port 3000</p>
+        <p>🔗 Use this to test tunneling functionality</p>
+        <p>📝 Current time: <span id="time"></span></p>
+    </div>
+    
+    <script>
+        function updateTime() {
+            document.getElementById('time').textContent = new Date().toLocaleString();
+        }
+        updateTime();
+        setInterval(updateTime, 1000);
+    </script>
+</body>
+</html>

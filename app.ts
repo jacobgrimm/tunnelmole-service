@@ -6,7 +6,11 @@ import logTelemetry from './src/handlers/log-telemetry';
 import express from 'express';
 import bodyParser from 'body-parser';
 import unreserveSubdomain from './src/handlers/unreserve-subdomain';
+import path from 'path';
 const app = express();
+
+// Serve static files from public directory
+app.use('/dashboard', express.static(path.join(__dirname, '..', 'public')));
 
 // Body will be a Buffer, easy to transfer to the client untouched
 const options = {

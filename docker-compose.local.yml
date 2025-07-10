@@ -1,0 +1,23 @@
+version: '3.8'
+
+services:
+  tunnelmole:
+    build: .
+    ports:
+      - "8000:8000"
+      - "8080:8080"
+    volumes:
+      - ./config-instance.toml:/app/config-instance.toml
+    environment:
+      - NODE_ENV=development
+    restart: unless-stopped
+
+  # Optional: Add a test web server to tunnel to
+  test-server:
+    image: nginx:alpine
+    ports:
+      - "3000:80"
+    volumes:
+      - ./test-html:/usr/share/nginx/html
+    profiles:
+      - test

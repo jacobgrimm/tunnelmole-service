@@ -1,0 +1,364 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Cost-optimized Tunnelmole Service with API Gateway, EC2 t2.micro, and free tier resources'
+
+Parameters:
+  DomainName:
+    Type: String
+    Description: Domain name for the service (e.g., tunnelmole.example.com)
+    Default: ""
+  
+  CertificateArn:
+    Type: String
+    Description: ARN of the SSL certificate from AWS Certificate Manager (optional)
+    Default: ""
+  
+  KeyPairName:
+    Type: String
+    Description: Name of an existing EC2 KeyPair to enable SSH access (optional)
+    Default: ""
+  
+  ECRRepositoryURI:
+    Type: String
+    Description: URI of the ECR repository containing the Docker image
+    Default: ""
+  
+  MonitoringPassword:
+    Type: String
+    Description: Password for accessing the monitoring endpoint
+    NoEcho: true
+    Default: changeme123!
+
+Resources:
+  # VPC and Networking (using default VPC to save costs)
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-VPC'
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-IGW'
+
+  InternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref VPC
+
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [0, !GetAZs '']
+      CidrBlock: 10.0.1.0/24
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-Public-Subnet'
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-Public-Routes'
+
+  DefaultPublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnet
+
+  # Security Groups
+  EC2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub '${AWS::StackName}-EC2-SG'
+      GroupDescription: Security group for EC2 instance
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+          Description: SSH access
+        - IpProtocol: tcp
+          FromPort: 8000
+          ToPort: 8000
+          CidrIp: 0.0.0.0/0
+          Description: HTTP service
+        - IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          CidrIp: 0.0.0.0/0
+          Description: WebSocket service
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-EC2-SG'
+
+  # IAM Role for EC2 to access ECR
+  EC2Role:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-EC2-Role'
+
+  EC2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref EC2Role
+
+  # EC2 Instance (t2.micro for free tier)
+  EC2Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: ami-0c02fb55956c7d316  # Amazon Linux 2023
+      InstanceType: t2.micro
+      KeyName: !If [HasKeyPair, !Ref KeyPairName, !Ref "AWS::NoValue"]
+      SecurityGroupIds:
+        - !Ref EC2SecurityGroup
+      SubnetId: !Ref PublicSubnet
+      IamInstanceProfile: !Ref EC2InstanceProfile
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          yum update -y
+          yum install -y docker
+          systemctl start docker
+          systemctl enable docker
+          usermod -a -G docker ec2-user
+          
+          # Install Docker Compose
+          curl -L "https://github.com/docker/compose/releases/download/1.29.2/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+          chmod +x /usr/local/bin/docker-compose
+          
+          # Create config file
+          mkdir -p /opt/tunnelmole
+          cat > /opt/tunnelmole/config-instance.toml << EOF
+          environment = "production"
+          
+          [server]
+          httpPort = 8000
+          websocketPort = 8080
+          domain = '${DomainName}'
+          password = '${MonitoringPassword}'
+          
+          [runtime]
+          debug = false
+          enableLogging = false
+          connectionTimeout = 43200
+          timeoutCheckFrequency = 5000
+          EOF
+          
+          # Login to ECR and pull image (if ECR URI provided)
+          if [ ! -z "${ECRRepositoryURI}" ]; then
+            aws ecr get-login-password --region ${AWS::Region} | docker login --username AWS --password-stdin ${ECRRepositoryURI}
+            
+            # Create docker-compose file
+            cat > /opt/tunnelmole/docker-compose.yml << EOF
+          version: '3.8'
+          services:
+            tunnelmole:
+              image: ${ECRRepositoryURI}:latest
+              ports:
+                - "8000:8000"
+                - "8080:8080"
+              volumes:
+                - ./config-instance.toml:/app/config-instance.toml
+              restart: unless-stopped
+          EOF
+            
+            # Start the service
+            cd /opt/tunnelmole
+            docker-compose up -d
+            
+            # Create a cron job to check for updates every 30 minutes (reduce frequency for cost)
+            echo "*/30 * * * * cd /opt/tunnelmole && aws ecr get-login-password --region ${AWS::Region} | docker login --username AWS --password-stdin ${ECRRepositoryURI} && docker-compose pull && docker-compose up -d" | crontab -
+          fi
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-EC2'
+
+  # API Gateway for HTTP traffic
+  RestApi:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: !Sub '${AWS::StackName}-API'
+      Description: API Gateway for Tunnelmole Service
+      EndpointConfiguration:
+        Types:
+          - REGIONAL
+      BinaryMediaTypes:
+        - '*/*'
+
+  # API Gateway Custom Domain (optional)
+  ApiDomainName:
+    Type: AWS::ApiGateway::DomainName
+    Condition: HasDomainAndCertificate
+    Properties:
+      DomainName: !Ref DomainName
+      RegionalCertificateArn: !Ref CertificateArn
+      EndpointConfiguration:
+        Types:
+          - REGIONAL
+      SecurityPolicy: TLS_1_2
+
+  # API Gateway Base Path Mapping
+  ApiBasePathMapping:
+    Type: AWS::ApiGateway::BasePathMapping
+    Condition: HasDomainAndCertificate
+    Properties:
+      DomainName: !Ref ApiDomainName
+      RestApiId: !Ref RestApi
+      Stage: !Ref ApiStage
+
+  # API Gateway Resource (proxy all requests)
+  ApiProxyResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref RestApi
+      ParentId: !GetAtt RestApi.RootResourceId
+      PathPart: '{proxy+}'
+
+  # API Gateway Method (proxy all HTTP methods)
+  ApiProxyMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref RestApi
+      ResourceId: !Ref ApiProxyResource
+      HttpMethod: ANY
+      AuthorizationType: NONE
+      Integration:
+        Type: HTTP_PROXY
+        IntegrationHttpMethod: ANY
+        Uri: !Sub 'http://${EC2Instance.PublicDnsName}:8000/{proxy}'
+        PassthroughBehavior: WHEN_NO_MATCH
+        IntegrationResponses:
+          - StatusCode: 200
+      MethodResponses:
+        - StatusCode: 200
+
+  # API Gateway Method for root path
+  ApiRootMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref RestApi
+      ResourceId: !GetAtt RestApi.RootResourceId
+      HttpMethod: ANY
+      AuthorizationType: NONE
+      Integration:
+        Type: HTTP_PROXY
+        IntegrationHttpMethod: ANY
+        Uri: !Sub 'http://${EC2Instance.PublicDnsName}:8000/'
+        PassthroughBehavior: WHEN_NO_MATCH
+        IntegrationResponses:
+          - StatusCode: 200
+      MethodResponses:
+        - StatusCode: 200
+
+  # API Gateway Deployment
+  ApiDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn:
+      - ApiProxyMethod
+      - ApiRootMethod
+    Properties:
+      RestApiId: !Ref RestApi
+      StageName: prod
+
+  # API Gateway Stage
+  ApiStage:
+    Type: AWS::ApiGateway::Stage
+    Properties:
+      RestApiId: !Ref RestApi
+      DeploymentId: !Ref ApiDeployment
+      StageName: prod
+      ThrottlingBurstLimit: 100
+      ThrottlingRateLimit: 50
+
+  # Elastic IP for EC2 instance (to maintain consistent endpoint)
+  ElasticIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+      InstanceId: !Ref EC2Instance
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-EIP'
+
+Conditions:
+  HasKeyPair: !Not [!Equals [!Ref KeyPairName, ""]]
+  HasDomainAndCertificate: !And 
+    - !Not [!Equals [!Ref DomainName, ""]]
+    - !Not [!Equals [!Ref CertificateArn, ""]]
+
+Outputs:
+  ApiGatewayURL:
+    Description: URL of the API Gateway
+    Value: !Sub 'https://${RestApi}.execute-api.${AWS::Region}.amazonaws.com/prod'
+    Export:
+      Name: !Sub '${AWS::StackName}-ApiGatewayURL'
+  
+  CustomDomainURL:
+    Description: Custom domain URL (if configured)
+    Condition: HasDomainAndCertificate
+    Value: !Sub 'https://${DomainName}'
+    Export:
+      Name: !Sub '${AWS::StackName}-CustomDomainURL'
+  
+  DashboardURL:
+    Description: URL to access the dashboard
+    Value: !Sub 
+      - 'https://${Domain}/dashboard/'
+      - Domain: !If 
+          - HasDomainAndCertificate
+          - !Ref DomainName
+          - !Sub '${RestApi}.execute-api.${AWS::Region}.amazonaws.com/prod'
+  
+  WebSocketEndpoint:
+    Description: WebSocket endpoint for clients (direct to EC2)
+    Value: !Sub 'ws://${ElasticIP}:8080'
+  
+  EC2PublicIP:
+    Description: Public IP of the EC2 instance
+    Value: !Ref ElasticIP
+    Export:
+      Name: !Sub '${AWS::StackName}-EC2PublicIP'
+  
+  EC2InstanceId:
+    Description: ID of the EC2 instance
+    Value: !Ref EC2Instance
+    Export:
+      Name: !Sub '${AWS::StackName}-EC2InstanceId'
+  
+  EstimatedMonthlyCost:
+    Description: Estimated monthly cost breakdown
+    Value: "EC2 t2.micro: $0 (free tier), EIP: $0 (attached), API Gateway: ~$3.50/million requests, Data Transfer: $0.09/GB"
