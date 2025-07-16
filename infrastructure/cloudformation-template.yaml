@@ -358,8 +358,9 @@ Resources:
       RestApiId: !Ref RestApi
       DeploymentId: !Ref ApiDeployment
       StageName: prod
-      ThrottlingBurstLimit: 100
-      ThrottlingRateLimit: 50
+      ThrottleSettings:
+        BurstLimit: 100
+        RateLimit: 50
 
   # Elastic IP for EC2 instance (to maintain consistent endpoint)
   ElasticIP:

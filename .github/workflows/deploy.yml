@@ -36,6 +36,32 @@ jobs:
     steps:
     - name: Checkout code
       uses: actions/checkout@v3
+      with:
+        fetch-depth: 0  # Fetch full history for change detection
+    
+    - name: Check for code changes
+      id: code-changes
+      run: |
+        # Check if there are changes in source code, package files, or Docker files
+        if git diff --name-only HEAD~1 HEAD | grep -E '\.(ts|js|json|toml|dockerfile|Dockerfile)$|package\.json|package-lock\.json|tsconfig\.json|^src/|^srv/|^app\.ts|^config\.ts|^constants\.ts|^message-handlers\.ts|^websocket\.ts' > /dev/null; then
+          echo "code_changed=true" >> $GITHUB_OUTPUT
+          echo "Code changes detected - Docker build required"
+        else
+          echo "code_changed=false" >> $GITHUB_OUTPUT
+          echo "No code changes detected - skipping Docker build"
+        fi
+    
+    - name: Check for infrastructure changes
+      id: infra-changes
+      run: |
+        # Check if there are changes in infrastructure files
+        if git diff --name-only HEAD~1 HEAD | grep -E '^infrastructure/|^\.github/workflows/' > /dev/null; then
+          echo "infra_changed=true" >> $GITHUB_OUTPUT
+          echo "Infrastructure changes detected"
+        else
+          echo "infra_changed=false" >> $GITHUB_OUTPUT
+          echo "No infrastructure changes detected"
+        fi
     
     - name: Configure AWS credentials
       uses: aws-actions/configure-aws-credentials@v2
@@ -44,11 +70,19 @@ jobs:
         aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         aws-region: ${{ env.AWS_REGION }}
     
+    - name: Validate CloudFormation template
+      run: |
+        echo "Validating CloudFormation template..."
+        aws cloudformation validate-template --template-body file://infrastructure/cloudformation-template.yaml
+        echo "✅ CloudFormation template validation passed"
+    
     - name: Login to Amazon ECR
       id: login-ecr
+      if: steps.code-changes.outputs.code_changed == 'true'
       uses: aws-actions/amazon-ecr-login@v1
     
     - name: Create ECR repository if it doesn't exist
+      if: steps.code-changes.outputs.code_changed == 'true'
       run: |
         aws ecr describe-repositories --repository-names ${{ env.ECR_REPOSITORY }} || \
         aws ecr create-repository --repository-name ${{ env.ECR_REPOSITORY }} --region ${{ env.AWS_REGION }}
@@ -56,14 +90,24 @@ jobs:
     - name: Set ECR repository URI
       id: set-ecr-uri
       run: |
-        ECR_URI="${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}"
+        # Get existing ECR URI if no code changes, otherwise use login output
+        if [ "${{ steps.code-changes.outputs.code_changed }}" == "true" ]; then
+          ECR_URI="${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}"
+        else
+          # Get existing ECR URI from AWS
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          ECR_URI="$ACCOUNT_ID.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_REPOSITORY }}"
+        fi
         echo "ecr_uri=$ECR_URI" >> $GITHUB_OUTPUT
     
     - name: Build, tag, and push image to Amazon ECR
+      if: steps.code-changes.outputs.code_changed == 'true'
       env:
         ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
         IMAGE_TAG: ${{ github.sha }}
       run: |
+        echo "Building Docker image due to code changes..."
+        
         # Build Docker image
         docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
         docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:latest .
@@ -74,10 +118,16 @@ jobs:
         
         # Output the image URI
         echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
+        echo "✅ Docker image built and pushed successfully"
+    
+    - name: Skip Docker build
+      if: steps.code-changes.outputs.code_changed == 'false'
+      run: |
+        echo "⏭️ Skipping Docker build - no code changes detected"
+        echo "Using existing Docker image from ECR"
     
     - name: Deploy CloudFormation stack
       env:
-        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
         STACK_NAME: tunnelmole-service-stack
       run: |
         # Set default values for optional parameters
@@ -91,11 +141,21 @@ jobs:
           MONITORING_PASSWORD="changeme123!"
         fi
         
+        # Use the ECR URI from the previous step
+        ECR_URI="${{ steps.set-ecr-uri.outputs.ecr_uri }}"
+        
+        echo "Deploying CloudFormation stack..."
+        if [ "${{ steps.code-changes.outputs.code_changed }}" == "true" ]; then
+          echo "🔄 Deploying with new Docker image"
+        else
+          echo "🔄 Deploying with existing Docker image"
+        fi
+        
         aws cloudformation deploy \
           --template-file infrastructure/cloudformation-template.yaml \
           --stack-name $STACK_NAME \
           --parameter-overrides \
-            ECRRepositoryURI=$ECR_REGISTRY/$ECR_REPOSITORY \
+            ECRRepositoryURI="$ECR_URI" \
             DomainName="$DOMAIN_NAME" \
             CertificateArn="$CERTIFICATE_ARN" \
             KeyPairName="$KEY_PAIR_NAME" \
@@ -103,6 +163,8 @@ jobs:
             CreateKeyPair=true \
           --capabilities CAPABILITY_IAM \
           --region ${{ env.AWS_REGION }}
+        
+        echo "✅ CloudFormation deployment completed"
     
     - name: Get stack outputs
       env:
@@ -114,9 +176,12 @@ jobs:
           --output table
     
     - name: Update EC2 instance
+      if: steps.code-changes.outputs.code_changed == 'true'
       env:
         STACK_NAME: tunnelmole-service-stack
       run: |
+        echo "Updating EC2 instance with new Docker image..."
+        
         # Get the EC2 instance ID from CloudFormation outputs
         INSTANCE_ID=$(aws cloudformation describe-stacks \
           --stack-name $STACK_NAME \
@@ -127,8 +192,15 @@ jobs:
         aws ssm send-command \
           --instance-ids $INSTANCE_ID \
           --document-name "AWS-RunShellScript" \
-          --parameters 'commands=["cd /opt/tunnelmole && aws ecr get-login-password --region ${{ env.AWS_REGION }} | docker login --username AWS --password-stdin ${{ steps.login-ecr.outputs.registry }} && docker-compose pull && docker-compose up -d"]' \
+          --parameters 'commands=["cd /opt/tunnelmole && aws ecr get-login-password --region ${{ env.AWS_REGION }} | docker login --username AWS --password-stdin ${{ steps.set-ecr-uri.outputs.ecr_uri }} && docker-compose pull && docker-compose up -d"]' \
           --region ${{ env.AWS_REGION }} || echo "SSM command failed, container will update via cron job"
+        
+        echo "✅ EC2 instance update initiated"
+    
+    - name: Skip EC2 update
+      if: steps.code-changes.outputs.code_changed == 'false'
+      run: |
+        echo "⏭️ Skipping EC2 update - no code changes detected"
     
     - name: Display deployment summary
       env:
@@ -136,7 +208,15 @@ jobs:
       run: |
         echo "=== Deployment Summary ==="
         echo "Stack Name: $STACK_NAME"
-        echo "ECR Repository: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}"
+        echo "ECR Repository: ${{ steps.set-ecr-uri.outputs.ecr_uri }}"
+        echo "Code Changes: ${{ steps.code-changes.outputs.code_changed }}"
+        echo "Infrastructure Changes: ${{ steps.infra-changes.outputs.infra_changed }}"
+        echo ""
+        if [ "${{ steps.code-changes.outputs.code_changed }}" == "true" ]; then
+          echo "✅ New Docker image built and deployed"
+        else
+          echo "⏭️ Existing Docker image reused"
+        fi
         echo ""
         echo "=== Required Secrets for Custom Domain (Optional) ==="
         echo "DOMAIN_NAME: Your custom domain"
