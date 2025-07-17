@@ -160,7 +160,7 @@ Resources:
         - Key: Name
           Value: !Sub '${AWS::StackName}-EC2-SG'
 
-  # IAM Role for EC2 to access ECR
+  # IAM Role for EC2 to access ECR and SSM
   EC2Role:
     Type: AWS::IAM::Role
     Properties:
@@ -173,6 +173,8 @@ Resources:
             Action: sts:AssumeRole
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+        - arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
       Tags:
         - Key: Name
           Value: !Sub '${AWS::StackName}-EC2-Role'
@@ -208,6 +210,11 @@ Resources:
           systemctl start docker
           systemctl enable docker
           usermod -a -G docker ec2-user
+          
+          # Install and configure SSM Agent
+          yum install -y amazon-ssm-agent
+          systemctl enable amazon-ssm-agent
+          systemctl start amazon-ssm-agent
           
           # Install Docker Compose
           curl -L "https://github.com/docker/compose/releases/download/1.29.2/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
@@ -263,6 +270,12 @@ Resources:
       Tags:
         - Key: Name
           Value: !Sub '${AWS::StackName}-EC2'
+        - Key: Environment
+          Value: production
+        - Key: SSMManaged
+          Value: 'true'
+        - Key: Application
+          Value: tunnelmole-service
 
   # API Gateway for HTTP traffic
   RestApi:
@@ -275,6 +288,83 @@ Resources:
           - REGIONAL
       BinaryMediaTypes:
         - '*/*'
+
+  # WebSocket API Gateway for WebSocket connections
+  WebSocketApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: !Sub '${AWS::StackName}-WebSocket-API'
+      Description: WebSocket API Gateway for Tunnelmole Service
+      ProtocolType: WEBSOCKET
+      RouteSelectionExpression: $request.body.action
+
+  # WebSocket API Integration
+  WebSocketIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref WebSocketApi
+      IntegrationType: HTTP_PROXY
+      IntegrationUri: !Sub 'http://${EC2Instance.PrivateIp}:8080'
+      IntegrationMethod: ANY
+
+  # WebSocket API Routes
+  WebSocketConnectRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WebSocketApi
+      RouteKey: $connect
+      Target: !Sub 'integrations/${WebSocketIntegration}'
+
+  WebSocketDisconnectRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WebSocketApi
+      RouteKey: $disconnect
+      Target: !Sub 'integrations/${WebSocketIntegration}'
+
+  WebSocketDefaultRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WebSocketApi
+      RouteKey: $default
+      Target: !Sub 'integrations/${WebSocketIntegration}'
+
+  # WebSocket API Deployment
+  WebSocketDeployment:
+    Type: AWS::ApiGatewayV2::Deployment
+    DependsOn:
+      - WebSocketConnectRoute
+      - WebSocketDisconnectRoute
+      - WebSocketDefaultRoute
+    Properties:
+      ApiId: !Ref WebSocketApi
+
+  # WebSocket API Stage
+  WebSocketStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref WebSocketApi
+      DeploymentId: !Ref WebSocketDeployment
+      StageName: prod
+
+  # WebSocket Custom Domain (optional)
+  WebSocketDomainName:
+    Type: AWS::ApiGatewayV2::DomainName
+    Condition: HasDomainAndCertificate
+    Properties:
+      DomainName: !Sub 'ws.${DomainName}'
+      DomainNameConfigurations:
+        - CertificateArn: !Ref CertificateArn
+          EndpointType: REGIONAL
+
+  # WebSocket API Mapping
+  WebSocketApiMapping:
+    Type: AWS::ApiGatewayV2::ApiMapping
+    Condition: HasDomainAndCertificate
+    Properties:
+      ApiId: !Ref WebSocketApi
+      DomainName: !Ref WebSocketDomainName
+      Stage: !Ref WebSocketStage
 
   # API Gateway Custom Domain (optional)
   ApiDomainName:
@@ -431,6 +521,29 @@ Outputs:
     Export:
       Name: !Sub '${AWS::StackName}-KeyPairName'
   
+  SSMInstanceId:
+    Description: Instance ID for SSM commands
+    Value: !Ref EC2Instance
+    Export:
+      Name: !Sub '${AWS::StackName}-SSMInstanceId'
+  
+  SSMCommandExample:
+    Description: Example SSM command to update the service
+    Value: !Sub 'aws ssm send-command --instance-ids ${EC2Instance} --document-name "AWS-RunShellScript" --parameters "commands=[\"cd /opt/tunnelmole && docker-compose pull && docker-compose up -d\"]" --region ${AWS::Region}'
+  
+  WebSocketApiEndpoint:
+    Description: WebSocket API Gateway endpoint for tunnelmole clients
+    Value: !Sub 'wss://${WebSocketApi}.execute-api.${AWS::Region}.amazonaws.com/prod'
+    Export:
+      Name: !Sub '${AWS::StackName}-WebSocketEndpoint'
+  
+  WebSocketCustomDomain:
+    Condition: HasDomainAndCertificate
+    Description: Custom WebSocket domain (if configured)
+    Value: !Sub 'wss://ws.${DomainName}'
+    Export:
+      Name: !Sub '${AWS::StackName}-WebSocketCustomDomain'
+  
   EstimatedMonthlyCost:
     Description: Estimated monthly cost breakdown
-    Value: "EC2 t2.micro: $0 (free tier), EIP: $0 (attached), API Gateway: ~$3.50/million requests, Data Transfer: $0.09/GB, ECR: $0.10/GB"
+    Value: "EC2 t2.micro: $0 (free tier), EIP: $0 (attached), REST API Gateway: ~$3.50/million requests, WebSocket API Gateway: ~$1.00/million connections + $0.25/million messages, Data Transfer: $0.09/GB, ECR: $0.10/GB"
