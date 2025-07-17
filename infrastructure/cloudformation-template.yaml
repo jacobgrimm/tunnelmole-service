@@ -429,11 +429,8 @@ Resources:
       AuthorizationType: NONE
       Integration:
         Type: HTTP_PROXY
-        IntegrationHttpMethod: ANY
         Uri: !Sub 'http://${ElasticIP}:8000/{proxy}'
         PassthroughBehavior: WHEN_NO_MATCH
-        IntegrationResponses:
-          - StatusCode: 200
       MethodResponses:
         - StatusCode: 200
 
@@ -447,11 +444,8 @@ Resources:
       AuthorizationType: NONE
       Integration:
         Type: HTTP_PROXY
-        IntegrationHttpMethod: ANY
         Uri: !Sub 'http://${ElasticIP}:8000/'
         PassthroughBehavior: WHEN_NO_MATCH
-        IntegrationResponses:
-          - StatusCode: 200
       MethodResponses:
         - StatusCode: 200
 
