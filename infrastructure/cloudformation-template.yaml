@@ -295,7 +295,7 @@ Resources:
     Properties:
       DomainName: !Ref ApiDomainName
       RestApiId: !Ref RestApi
-      Stage: !Ref ApiStage
+      Stage: prod
 
   # API Gateway Resource (proxy all requests)
   ApiProxyResource:
@@ -350,19 +350,6 @@ Resources:
     Properties:
       RestApiId: !Ref RestApi
       StageName: prod
-
-  # API Gateway Stage
-  ApiStage:
-    Type: AWS::ApiGateway::Stage
-    Properties:
-      RestApiId: !Ref RestApi
-      DeploymentId: !Ref ApiDeployment
-      StageName: prod
-      MethodSettings:
-        - ResourcePath: "/*"
-          HttpMethod: "*"
-          ThrottlingBurstLimit: 100
-          ThrottlingRateLimit: 50
 
   # Elastic IP for EC2 instance (to maintain consistent endpoint)
   ElasticIP:
