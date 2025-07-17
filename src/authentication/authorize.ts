@@ -4,8 +4,15 @@ import HostipWebSocket from '../websocket/host-ip-websocket';
 import InitialiseMessage from '../messages/initialise-message';
 import InvalidSubscriptionMessage from '../messages/invalid-subscription-message';
 import initialise from '../message-handlers/initialise';
+import config from '../../config';
 
 const authorize = async(message: InitialiseMessage, websocket: HostipWebSocket, randomSubdomain: string) : Promise<boolean> => {
+    // Skip API key validation in local development
+    if (config.environment === 'local') {
+        console.log('Local development mode: Skipping API key validation');
+        return true;
+    }
+
     const { apiKey } = message;
     const apiKeys = JSON.parse(fs.readFileSync(ROOT_DIR + "/src/authentication/apiKeys.json").toString());
 
