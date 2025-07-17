@@ -175,6 +175,17 @@ Resources:
         - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
         - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
         - arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
+      Policies:
+        - PolicyName: ApiGatewayReadAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - apigateway:GET
+                Resource: 
+                  - !Sub 'arn:aws:apigateway:${AWS::Region}::/restapis'
+                  - !Sub 'arn:aws:apigateway:${AWS::Region}::/restapis/*'
       Tags:
         - Key: Name
           Value: !Sub '${AWS::StackName}-EC2-Role'
@@ -220,6 +231,19 @@ Resources:
           curl -L "https://github.com/docker/compose/releases/download/1.29.2/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
           chmod +x /usr/local/bin/docker-compose
           
+          # Determine the correct domain for tunnelmole
+          DOMAIN_NAME="${DomainName}"
+          if [ -z "$DOMAIN_NAME" ]; then
+            echo "No custom domain provided, determining API Gateway domain..."
+            # Get the REST API Gateway ID after it's created
+            sleep 30  # Give CloudFormation time to create the API Gateway
+            REST_API_ID=$(aws apigateway get-rest-apis --query "items[?name=='${AWS::StackName}-API'].id" --output text --region ${AWS::Region})
+            DOMAIN_NAME="$REST_API_ID.execute-api.${AWS::Region}.amazonaws.com"
+            echo "Using API Gateway domain: $DOMAIN_NAME"
+          else
+            echo "Using custom domain: $DOMAIN_NAME"
+          fi
+          
           # Create config file
           mkdir -p /opt/tunnelmole
           cat > /opt/tunnelmole/config-instance.toml << EOF
@@ -228,7 +252,7 @@ Resources:
           [server]
           httpPort = 8000
           websocketPort = 8080
-          domain = '${DomainName}'
+          domain = '$DOMAIN_NAME'
           password = '${MonitoringPassword}'
           
           [runtime]
@@ -406,7 +430,7 @@ Resources:
       Integration:
         Type: HTTP_PROXY
         IntegrationHttpMethod: ANY
-        Uri: !Sub 'http://${EC2Instance.PublicDnsName}:8000/{proxy}'
+        Uri: !Sub 'http://${ElasticIP}:8000/{proxy}'
         PassthroughBehavior: WHEN_NO_MATCH
         IntegrationResponses:
           - StatusCode: 200
@@ -424,7 +448,7 @@ Resources:
       Integration:
         Type: HTTP_PROXY
         IntegrationHttpMethod: ANY
-        Uri: !Sub 'http://${EC2Instance.PublicDnsName}:8000/'
+        Uri: !Sub 'http://${ElasticIP}:8000/'
         PassthroughBehavior: WHEN_NO_MATCH
         IntegrationResponses:
           - StatusCode: 200
@@ -543,6 +567,15 @@ Outputs:
     Value: !Sub 'wss://ws.${DomainName}'
     Export:
       Name: !Sub '${AWS::StackName}-WebSocketCustomDomain'
+  
+  TunnelmoleDomainConfig:
+    Description: Domain to use in tunnelmole service config
+    Value: !If 
+      - HasDomainAndCertificate
+      - !Ref DomainName
+      - !Sub '${RestApi}.execute-api.${AWS::Region}.amazonaws.com'
+    Export:
+      Name: !Sub '${AWS::StackName}-TunnelmoleDomain'
   
   EstimatedMonthlyCost:
     Description: Estimated monthly cost breakdown
