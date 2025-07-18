@@ -429,6 +429,7 @@ Resources:
       AuthorizationType: NONE
       Integration:
         Type: HTTP_PROXY
+        IntegrationHttpMethod: ANY
         Uri: !Sub 'http://${ElasticIP}:8000/{proxy}'
         PassthroughBehavior: WHEN_NO_MATCH
       MethodResponses:
@@ -444,6 +445,7 @@ Resources:
       AuthorizationType: NONE
       Integration:
         Type: HTTP_PROXY
+        IntegrationHttpMethod: ANY
         Uri: !Sub 'http://${ElasticIP}:8000/'
         PassthroughBehavior: WHEN_NO_MATCH
       MethodResponses:

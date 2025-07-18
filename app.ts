@@ -12,6 +12,16 @@ const app = express();
 // Serve static files from public directory
 app.use('/dashboard', express.static(path.join(__dirname, '..', 'public')));
 
+// Serve dashboard HTML for root requests
+app.get('/', (req, res) => {
+  res.redirect('/dashboard/');
+});
+
+// Serve dashboard directly for API Gateway requests
+app.get('/dashboard/', (req, res) => {
+  res.sendFile(path.join(__dirname, '..', 'public', 'index.html'));
+});
+
 // Body will be a Buffer, easy to transfer to the client untouched
 const options = {
   inflate: false,

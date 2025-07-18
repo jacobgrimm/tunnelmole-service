@@ -15,15 +15,26 @@ const handleRequest = async function(request : Request, response : Response) {
     const url = new URL('https://' + request.headers.host);
     const hostname = url.hostname;
     const requestId = nanoid();
+    
+    // Skip tunnel handling for known service endpoints
+    if (request.path.startsWith('/dashboard') || 
+        request.path.startsWith('/tunnelmole-connections') ||
+        request.path.startsWith('/tunnelmole-log-telemetry') ||
+        request.path.startsWith('/tunnelmole/unreserve-subdomain')) {
+        response.status(404);
+        response.send("Endpoint not found");
+        return;
+    }
+    
     const connection : Connection = proxy.findConnectionByHostname(hostname);
 
     if (typeof connection === 'undefined') {
         response.status(404);
-        response.send("No matching tunnelmole domain for " + hostname);
+        response.send(`No active tunnel found for domain: ${hostname}. This request was not routed to any connected client.`);
         return;
     }
 
-    const headers = {};
+    const headers: {[key: string]: any} = {};
     for (const key in request.headers) {
         const name = capitalize.words(key);
         const value = request.headers[key];
